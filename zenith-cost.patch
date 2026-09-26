@@ -1,0 +1,332 @@
+diff --git a/src/slic3r/GUI/GCodeRenderer/BaseRenderer.cpp b/src/slic3r/GUI/GCodeRenderer/BaseRenderer.cpp
+index 8dc9b56..cb4370d 100644
+--- a/src/slic3r/GUI/GCodeRenderer/BaseRenderer.cpp
++++ b/src/slic3r/GUI/GCodeRenderer/BaseRenderer.cpp
+@@ -1,4 +1,5 @@
+ #include "BaseRenderer.hpp"
++#include "ZenithCostPanel.hpp"
+ #include "slic3r/GUI/IMSlider.hpp"
+ #include "slic3r/GUI/GUI_App.hpp"
+ #include "slic3r/GUI/GUI_Utils.hpp"
+@@ -2706,6 +2707,10 @@ namespace Slic3r
+                     default: { assert(false); break; }
+                     }
+                 }
++                // Keep cost attached to the current sliced plate, never an imported G-code
++                // view whose PrintStatistics may belong to a different editor plate.
++                if (wxGetApp().is_editor() && !m_only_gcode_in_preview && time_mode.time > 0.0f)
++                    ZenithCost::render(*wxGetApp().app_config, ps.total_weight, time_mode.time, ps.total_cost);
+                 if (m_view_type == EViewType::ColorPrint) {
+                     ImGui::Spacing();
+                     ImGui::Dummy({ window_padding, window_padding });
+diff --git a/src/slic3r/GUI/GCodeRenderer/ZenithCost.hpp b/src/slic3r/GUI/GCodeRenderer/ZenithCost.hpp
+new file mode 100644
+index 0000000..c9b6c8a
+--- /dev/null
++++ b/src/slic3r/GUI/GCodeRenderer/ZenithCost.hpp
+@@ -0,0 +1,84 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++#pragma once
++#include <cmath>
++#include <iomanip>
++#include <locale>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++
++namespace ZenithCost {
++struct Settings {
++    double filament_kg = 900, electricity_kwh = 7, watts = 150;
++    double machine_hour = 7, wear_percent = 15, packaging = 10, shipping = 40;
++    double markup_percent = 50;
++    bool electricity_on = false, machine_on = false, wear_on = false;
++    bool packaging_on = false, shipping_on = false, profile_prices = false;
++};
++struct Result {
++    double material, electricity, machine, wear, packaging, shipping;
++    double total, profit, price;
++};
++inline double bounded(double value, double fallback, double maximum = 1000000) {
++    return std::isfinite(value) && value >= 0 && value <= maximum ? value : fallback;
++}
++inline double parse(const std::string& text, double fallback) {
++    std::istringstream in(text);
++    in.imbue(std::locale::classic());
++    double value;
++    if (!(in >> value)) return fallback;
++    in >> std::ws;
++    return in.eof() ? bounded(value, fallback) : fallback;
++}
++inline std::string number(double value) {
++    std::ostringstream out;
++    out.imbue(std::locale::classic());
++    out << std::setprecision(15) << value;
++    return out.str();
++}
++inline Result calculate(double grams, double seconds, double profile_material, const Settings& s) {
++    if (!std::isfinite(grams) || grams < 0 || !std::isfinite(seconds) || seconds <= 0 ||
++        (s.profile_prices && (!std::isfinite(profile_material) || profile_material < 0)))
++        throw std::invalid_argument("Invalid slice cost input");
++    const double hours = seconds / 3600.0;
++    Result r{};
++    r.material = s.profile_prices ? profile_material : grams / 1000 * s.filament_kg;
++    r.electricity = s.electricity_on ? hours * s.watts / 1000 * s.electricity_kwh : 0;
++    r.machine = s.machine_on ? hours * s.machine_hour : 0;
++    const double subtotal = r.material + r.electricity + r.machine;
++    r.wear = s.wear_on ? subtotal * s.wear_percent / 100 : 0;
++    r.packaging = s.packaging_on ? s.packaging : 0;
++    r.shipping = s.shipping_on ? s.shipping : 0;
++    r.total = subtotal + r.wear + r.packaging + r.shipping;
++    r.profit = r.total * s.markup_percent / 100;
++    r.price = r.total + r.profit;
++    return r;
++}
++// The config interface is Bambu Studio AppConfig::get/set(section, key, value).
++// Kept generic so persistence and calculations can be tested without a GUI.
++template<class Config> Settings load(const Config& config) {
++    Settings s;
++#define ZC_LOAD_NUM(field) s.field = parse(config.get("zenith_print_cost", #field), s.field)
++#define ZC_LOAD_BOOL(field) { const auto v = config.get("zenith_print_cost", #field); if (!v.empty()) s.field = v == "1"; }
++    ZC_LOAD_NUM(filament_kg); ZC_LOAD_NUM(electricity_kwh); ZC_LOAD_NUM(watts);
++    ZC_LOAD_NUM(machine_hour); ZC_LOAD_NUM(wear_percent); ZC_LOAD_NUM(packaging);
++    ZC_LOAD_NUM(shipping); ZC_LOAD_NUM(markup_percent);
++    ZC_LOAD_BOOL(electricity_on); ZC_LOAD_BOOL(machine_on); ZC_LOAD_BOOL(wear_on);
++    ZC_LOAD_BOOL(packaging_on); ZC_LOAD_BOOL(shipping_on); ZC_LOAD_BOOL(profile_prices);
++#undef ZC_LOAD_NUM
++#undef ZC_LOAD_BOOL
++    return s;
++}
++template<class Config> void save(Config& config, const Settings& s) {
++#define ZC_SAVE_NUM(field) config.set("zenith_print_cost", #field, number(s.field))
++#define ZC_SAVE_BOOL(field) config.set("zenith_print_cost", #field, std::string(s.field ? "1" : "0"))
++    ZC_SAVE_NUM(filament_kg); ZC_SAVE_NUM(electricity_kwh); ZC_SAVE_NUM(watts);
++    ZC_SAVE_NUM(machine_hour); ZC_SAVE_NUM(wear_percent); ZC_SAVE_NUM(packaging);
++    ZC_SAVE_NUM(shipping); ZC_SAVE_NUM(markup_percent);
++    ZC_SAVE_BOOL(electricity_on); ZC_SAVE_BOOL(machine_on); ZC_SAVE_BOOL(wear_on);
++    ZC_SAVE_BOOL(packaging_on); ZC_SAVE_BOOL(shipping_on); ZC_SAVE_BOOL(profile_prices);
++#undef ZC_SAVE_NUM
++#undef ZC_SAVE_BOOL
++    // AppConfig marks itself dirty; the application's existing autosave writes it.
++}
++}
+diff --git a/src/slic3r/GUI/GCodeRenderer/ZenithCostPanel.hpp b/src/slic3r/GUI/GCodeRenderer/ZenithCostPanel.hpp
+new file mode 100644
+index 0000000..a992d00
+--- /dev/null
++++ b/src/slic3r/GUI/GCodeRenderer/ZenithCostPanel.hpp
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++#pragma once
++#include "ZenithCost.hpp"
++#include <imgui/imgui.h>
++
++namespace ZenithCost {
++inline bool input(const char* label, double& value) {
++    const double previous = value;
++    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
++    if (!ImGui::InputDouble(label, &value, 0, 0, "%.2f")) return false;
++    value = bounded(value, previous);
++    return value != previous;
++}
++inline void money_row(const char* label, double amount) {
++    ImGui::TextUnformatted(label);
++    ImGui::SameLine(ImGui::GetFontSize() * 13.0f);
++    // INR avoids missing rupee glyphs in the bundled font atlas.
++    ImGui::Text("INR %.2f", amount);
++}
++template<class Config>
++void render(Config& config, double grams, double seconds, double profile_material) {
++    if (!std::isfinite(grams) || grams < 0 || !std::isfinite(seconds) || seconds <= 0) return;
++    static Settings settings = load(config);
++    static Settings draft;
++    ImGui::PushID("zenith_print_cost");
++    ImGui::Spacing();
++    ImGui::Separator();
++    ImGui::Indent(ImGui::GetFontSize() * 0.6f);
++    ImGui::Spacing();
++    ImGui::TextUnformatted("Print cost");
++    ImGui::SameLine();
++    if (ImGui::SmallButton("Settings")) {
++        draft = settings;
++        ImGui::OpenPopup("Cost settings");
++    }
++    // Popup has its own padding; the parent legend uses zero window padding.
++    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
++    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, ImGui::GetIO().DisplaySize.y * 0.8f));
++    if (ImGui::BeginPopup("Cost settings")) {
++        ImGui::TextUnformatted("ZENITH STUDIOS - Cost settings (INR)");
++        ImGui::Separator();
++        ImGui::Checkbox("Use filament profile prices", &draft.profile_prices);
++        if (draft.profile_prices) {
++            ImGui::TextUnformatted("Set each filament's price/kg in INR, then re-slice.");
++            ImGui::TextUnformatted("No currency conversion is performed.");
++        } else input("Filament / kg", draft.filament_kg);
++        ImGui::Checkbox("Include electricity", &draft.electricity_on);
++        if (draft.electricity_on) {
++            input("Electricity / kWh", draft.electricity_kwh);
++            input("Average printer power (W)", draft.watts);
++        }
++        ImGui::Checkbox("Include machine cost", &draft.machine_on);
++        if (draft.machine_on) input("Machine / hour", draft.machine_hour);
++        ImGui::Checkbox("Include wear / failures", &draft.wear_on);
++        if (draft.wear_on) input("Wear / failures (%)", draft.wear_percent);
++        ImGui::Checkbox("Include packaging", &draft.packaging_on);
++        if (draft.packaging_on) input("Packaging / plate", draft.packaging);
++        ImGui::Checkbox("Include shipping", &draft.shipping_on);
++        if (draft.shipping_on) input("Shipping / plate", draft.shipping);
++        input("Profit markup (%)", draft.markup_percent);
++        ImGui::TextUnformatted("Wear applies to material + electricity + machine.");
++        ImGui::TextUnformatted("Selling price = total cost x (1 + markup / 100).");
++        if (ImGui::Button("Save defaults")) {
++            settings = draft;
++            save(config, settings);
++            ImGui::CloseCurrentPopup();
++        }
++        ImGui::SameLine();
++        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
++        ImGui::SameLine();
++        if (ImGui::Button("Reset")) draft = Settings{};
++        ImGui::EndPopup();
++    }
++    ImGui::PopStyleVar();
++    if (input("Profit markup (%)", settings.markup_percent)) save(config, settings);
++    if (settings.profile_prices && (!std::isfinite(profile_material) || profile_material < 0)) {
++        ImGui::TextUnformatted("Filament cost unavailable. Check profiles and re-slice.");
++    } else {
++        const Result r = calculate(grams, seconds, profile_material, settings);
++        money_row("Total cost", r.total);
++        money_row("Profit", r.profit);
++        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.20f, 0.75f, 0.43f, 1.0f));
++        money_row("Selling price", r.price);
++        ImGui::PopStyleColor();
++        if (ImGui::TreeNode("Breakdown")) {
++            ImGui::Text("Current plate: %.2f g | %.2f hours", grams, seconds / 3600);
++            money_row("Filament", r.material);
++            if (settings.electricity_on) money_row("Electricity", r.electricity);
++            if (settings.machine_on) money_row("Machine", r.machine);
++            if (settings.wear_on) money_row("Wear / failures", r.wear);
++            if (settings.packaging_on) money_row("Packaging", r.packaging);
++            if (settings.shipping_on) money_row("Shipping", r.shipping);
++            ImGui::TextUnformatted("Includes sliced supports, flushing and tower.");
++            ImGui::TextUnformatted("Packaging and shipping are charged once per plate.");
++            ImGui::TreePop();
++        }
++    }
++    ImGui::Spacing();
++    ImGui::Unindent(ImGui::GetFontSize() * 0.6f);
++    ImGui::PopID();
++}
++}
+diff --git a/zenith/tests/CMakeLists.txt b/zenith/tests/CMakeLists.txt
+new file mode 100644
+index 0000000..fce12c7
+--- /dev/null
++++ b/zenith/tests/CMakeLists.txt
+@@ -0,0 +1,19 @@
++cmake_minimum_required(VERSION 3.16)
++project(ZenithCostTests LANGUAGES CXX)
++enable_testing()
++get_filename_component(STUDIO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
++add_executable(zenith_cost_test cost_test.cpp)
++target_include_directories(zenith_cost_test PRIVATE "${STUDIO_ROOT}/src")
++target_compile_features(zenith_cost_test PRIVATE cxx_std_17)
++# Assertions must stay active in Release builds.
++if(MSVC)
++  target_compile_options(zenith_cost_test PRIVATE /UNDEBUG)
++else()
++  target_compile_options(zenith_cost_test PRIVATE -UNDEBUG)
++endif()
++add_test(NAME zenith_cost COMMAND zenith_cost_test)
++# Compile the panel against Bambu's actual bundled ImGui interface. Linking the
++# entire application and its dependencies is performed by the Windows build.
++add_library(zenith_panel_compile OBJECT panel_test.cpp)
++target_include_directories(zenith_panel_compile PRIVATE "${STUDIO_ROOT}/src")
++target_compile_features(zenith_panel_compile PRIVATE cxx_std_17)
+diff --git a/zenith/tests/cost_test.cpp b/zenith/tests/cost_test.cpp
+new file mode 100644
+index 0000000..54921f2
+--- /dev/null
++++ b/zenith/tests/cost_test.cpp
+@@ -0,0 +1,47 @@
++#include "slic3r/GUI/GCodeRenderer/ZenithCost.hpp"
++#include <cassert>
++#include <iostream>
++#include <limits>
++#include <map>
++using namespace ZenithCost;
++struct MemoryConfig {
++    std::map<std::string, std::string> values;
++    std::string get(const std::string& section, const std::string& key) const {
++        auto it = values.find(section + "/" + key);
++        return it == values.end() ? "" : it->second;
++    }
++    void set(const std::string& section, const std::string& key, const std::string& value) {
++        values[section + "/" + key] = value;
++    }
++};
++void near(double actual, double expected) { assert(std::abs(actual - expected) < 1e-8); }
++int main() {
++    Settings s;
++    auto r = calculate(150, 18000, 0, s);
++    near(r.material, 135); near(r.total, 135); near(r.profit, 67.5); near(r.price, 202.5);
++    s.electricity_on = s.machine_on = s.wear_on = s.packaging_on = s.shipping_on = true;
++    r = calculate(150, 18000, 0, s);
++    near(r.electricity, 5.25); near(r.machine, 35); near(r.wear, 26.2875);
++    near(r.total, 251.5375); near(r.price, 377.30625);
++    s.profile_prices = true;
++    // 120 g @ 800/kg + 80 g @ 1000/kg + 35 g @ 900/kg.
++    r = calculate(235, 3600, 207.5, s);
++    near(r.material, 207.5);
++    s.markup_percent = 0; near(calculate(235, 3600, 207.5, s).profit, 0);
++    s.markup_percent = 150; r = calculate(235, 3600, 207.5, s); near(r.price, r.total * 2.5);
++    s = Settings{}; s.electricity_on = true;
++    r = calculate(0, 1800, 0, s); near(r.total, 0.525); near(r.machine, 0);
++    for (double bad : {-1.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
++        bool threw = false; try { calculate(bad, 3600, 0, s); } catch (const std::invalid_argument&) { threw = true; } assert(threw);
++    }
++    bool threw = false; try { calculate(100, 0, 0, s); } catch (const std::invalid_argument&) { threw = true; } assert(threw);
++    MemoryConfig config;
++    s.markup_percent = 62.5; s.profile_prices = true; s.shipping_on = true;
++    save(config, s); auto restored = load(config);
++    near(restored.markup_percent, 62.5); assert(restored.profile_prices && restored.shipping_on);
++    config.set("zenith_print_cost", "filament_kg", "-900");
++    near(load(config).filament_kg, 900);
++    for (const char* bad : {"nan", "inf", "1e100", "abc", "9junk", "9,5"}) near(parse(bad, 7), 7);
++    near(parse("12.50", 7), 12.5); near(parse(number(62.5), 0), 62.5);
++    std::cout << "PASS: calculator, toggles, markup, profile totals, invalid data and settings round-trip\n";
++}
+diff --git a/zenith/tests/panel_test.cpp b/zenith/tests/panel_test.cpp
+new file mode 100644
+index 0000000..77c5411
+--- /dev/null
++++ b/zenith/tests/panel_test.cpp
+@@ -0,0 +1,29 @@
++#include "slic3r/GUI/GCodeRenderer/ZenithCostPanel.hpp"
++#include <imgui/imgui_internal.h>
++#include <map>
++#include <cassert>
++#include <iostream>
++struct Config {
++    std::map<std::string,std::string> v;
++    std::string get(const std::string& s,const std::string& k)const { auto i=v.find(s+k);return i==v.end()?"":i->second; }
++    void set(const std::string& s,const std::string& k,const std::string& x) { v[s+k]=x; }
++};
++int main() {
++    ImGui::CreateContext();
++    auto& io=ImGui::GetIO(); io.DisplaySize=ImVec2(1280,720);io.DeltaTime=1.0f/60;io.IniFilename=nullptr;
++    unsigned char* pixels;int w,h;io.Fonts->GetTexDataAsRGBA32(&pixels,&w,&h);
++    Config c;
++    for (int frame=0;frame<4;++frame) {
++        ImGui::NewFrame();ImGui::Begin("Legend");
++        if(frame>=2) {
++            ImGui::PushID("zenith_print_cost");ImGui::OpenPopup("Cost settings");ImGui::PopID();
++        }
++        ZenithCost::render(c,150,18000,135);
++        ImGui::End();ImGui::Render();
++        assert(ImGui::GetCurrentContext()->ColorStack.Size==0);
++        assert(ImGui::GetCurrentContext()->StyleVarStack.Size==0);
++        if(frame==1) assert(ImGui::GetDrawData()->TotalVtxCount>0);
++    }
++    ImGui::DestroyContext();
++    std::cout<<"PASS: panel and settings popup render using upstream ImGui; balanced style stacks\n";
++}

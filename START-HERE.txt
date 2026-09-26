@@ -1,0 +1,19 @@
+ZENITH STUDIOS - ONLINE WINDOWS BUILD
+
+No developer tools need to be installed on your PC. The workflow installs them on GitHub's Windows runner.
+
+1. Extract this ZIP.
+2. Sign in at https://github.com/new and create a repository named zenith-bambu-cost. Choose Public and enable Add a README. Public means the uploaded code is visible to everyone. Standard hosted Actions runners are free for public repositories.
+3. In the new repository choose Add file > Upload files. Upload Build-Windows.ps1, zenith-cost.patch and LICENSE from this package. Commit changes to main. Do not upload the ZIP or an enclosing folder.
+4. Choose Add file > Create new file. Name it exactly:
+   .github/workflows/build-windows.yml
+5. Open workflow-template.txt locally in Notepad. Copy all its contents into GitHub's new file editor. Commit changes to main.
+6. Open Actions > Build Zenith Bambu Studio > Run workflow > Run workflow. If GitHub asks to enable Actions, enable them first. The build runs online, so you can close the browser. First build may take hours; the job limit is six hours.
+7. When the run is green, open it, scroll to Artifacts and download Zenith-BambuStudio-Windows. Extract it fully. Locate bambu-studio.exe inside and keep all extracted files together.
+8. Back up your existing Bambu Studio presets/settings before the first launch: this unofficial build may share the official app's settings. Launch the extracted executable. Slice a model > Preview > scroll to Print cost > Settings. Save your costs and adjust profit markup.
+
+A red X means the build failed. Open the failed step and copy the error lines or take a screenshot. Send them back for diagnosis. No usable app is promised until this Windows build completes and the resulting app is tested.
+
+The package targets upstream Bambu Studio v02.07.01.57 at commit 3f126b717ed1f10fee0f32f05ed9731808d0c8bb. It does not upload your models, printer credentials or existing settings. Only upload these build files.
+
+The application and source download artifacts are retained for 14 days. Keep the corresponding-source artifact if you distribute the application. This workflow has been inspected and its YAML structure checked, but has not been run on GitHub. Full Windows application build and UI testing remain pending. The source patch's calculator tests and UI-header compilation passed on Linux.
