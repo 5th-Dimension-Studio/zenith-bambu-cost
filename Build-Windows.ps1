@@ -10,6 +10,35 @@ foreach ($tool in @('git','cmake','perl')) {
         throw "Missing $tool. Install the prerequisites in README.md first."
     }
 }
+# Select the real Windows executable, not Strawberry Perl's extensionless script.
+# The workflow already installs pkgconfiglite through Chocolatey.
+$ChocoRoot = $env:ChocolateyInstall
+if ([string]::IsNullOrWhiteSpace($ChocoRoot)) {
+    $ChocoRoot = Join-Path $env:ProgramData 'chocolatey'
+}
+$PkgRoot = Join-Path $ChocoRoot 'lib/pkgconfiglite'
+$PkgCandidates = @(Get-ChildItem -LiteralPath $PkgRoot -Filter 'pkg-config.exe' -File -Recurse -ErrorAction SilentlyContinue)
+if ($PkgCandidates.Count -eq 0) {
+    throw 'pkgconfiglite executable not found. Ensure the workflow installs pkgconfiglite using Chocolatey.'
+}
+$PkgConfigExe = $null
+foreach ($Candidate in $PkgCandidates) {
+    try {
+        $VersionOutput = & $Candidate.FullName --version
+        if ($LASTEXITCODE -eq 0 -and $VersionOutput) {
+            $PkgConfigExe = $Candidate.FullName
+            Write-Host "Using pkg-config: $PkgConfigExe (version $VersionOutput)"
+            break
+        }
+    } catch {
+        Write-Warning "Could not execute $($Candidate.FullName)"
+    }
+}
+if (-not $PkgConfigExe) { throw 'No working pkgconfiglite executable found; stopping before the long build.' }
+$env:PKG_CONFIG = $PkgConfigExe
+$env:Path = (Split-Path -Parent $PkgConfigExe) + ';' + $env:Path
+$PkgConfigArgument = "-DPKG_CONFIG_EXECUTABLE:FILEPATH=$PkgConfigExe"
+
 $WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 $Source = Join-Path $WorkDirectory 'BambuStudio'
@@ -38,11 +67,11 @@ Run 'cmake' @('--build',$Tests,'--config','Release','--parallel','2')
 Run 'ctest' @('--test-dir',$Tests,'-C','Release','--output-on-failure')
 $DepsBuild = Join-Path $Source 'deps/build'
 $DepsDest = Join-Path $DepsBuild 'BambuStudio_dep'
-Run 'cmake' @('-S',(Join-Path $Source 'deps'),'-B',$DepsBuild,'-G','Visual Studio 17 2022','-A','x64',"-DDESTDIR=$DepsDest",'-DCMAKE_BUILD_TYPE=Release','-DDEP_DEBUG=OFF')
+Run 'cmake' @('-S',(Join-Path $Source 'deps'),'-B',$DepsBuild,'-G','Visual Studio 17 2022','-A','x64',"-DDESTDIR=$DepsDest",'-DCMAKE_BUILD_TYPE=Release','-DDEP_DEBUG=OFF',$PkgConfigArgument)
 Run 'cmake' @('--build',$DepsBuild,'--config','Release','--parallel','2')
 $Build = Join-Path $Source 'build'
 $Install = Join-Path $WorkDirectory 'Zenith-BambuStudio-Windows'
-Run 'cmake' @('-S',$Source,'-B',$Build,'-G','Visual Studio 17 2022','-A','x64','-DBBL_RELEASE_TO_PUBLIC=1','-DBBL_INTERNAL_TESTING=0',"-DCMAKE_PREFIX_PATH=$DepsDest/usr/local","-DCMAKE_INSTALL_PREFIX=$Install",'-DCMAKE_BUILD_TYPE=Release')
+Run 'cmake' @('-S',$Source,'-B',$Build,'-G','Visual Studio 17 2022','-A','x64','-DBBL_RELEASE_TO_PUBLIC=1','-DBBL_INTERNAL_TESTING=0',"-DCMAKE_PREFIX_PATH=$DepsDest/usr/local","-DCMAKE_INSTALL_PREFIX=$Install",'-DCMAKE_BUILD_TYPE=Release',$PkgConfigArgument)
 Run 'cmake' @('--build',$Build,'--target','install','--config','Release','--parallel','2')
 Write-Host "Build completed. Application files: $Install"
 Write-Host 'Run the Windows acceptance checklist in README.md before using this custom build.'
