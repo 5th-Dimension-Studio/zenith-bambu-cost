@@ -218,10 +218,17 @@ index 0000000..a992d00
 +}
 +}
 diff --git a/src/slic3r/GUI/GLCanvas3D.cpp b/src/slic3r/GUI/GLCanvas3D.cpp
-index 2a89739..2dfe593 100644
+index 2a89739..e79cffd 100644
 --- a/src/slic3r/GUI/GLCanvas3D.cpp
 +++ b/src/slic3r/GUI/GLCanvas3D.cpp
-@@ -1745,6 +1745,7 @@ unsigned int GLCanvas3D::get_volumes_count() const {
+@@ -1,5 +1,6 @@
+ #include "libslic3r/libslic3r.h"
+ #include "GLCanvas3D.hpp"
++#include "ZenithFocus.hpp"
+ 
+ #include <chrono>
+ #include <igl/unproject.h>
+@@ -1745,6 +1746,7 @@ unsigned int GLCanvas3D::get_volumes_count() const {
  
  void GLCanvas3D::reset_volumes(bool set_notice)
  {
@@ -229,7 +236,52 @@ index 2a89739..2dfe593 100644
      if (!m_initialized)
          return;
  
-@@ -3067,6 +3068,7 @@ void GLCanvas3D::mirror_selection(Axis axis)
+@@ -2315,8 +2317,42 @@ void GLCanvas3D::zoom_to_volumes()
+ 
+ void GLCanvas3D::zoom_to_selection()
+ {
+-    if (!m_selection.is_empty())
+-        _zoom_to_box(m_selection.get_bounding_box());
++    if (m_selection.is_empty() || m_zenith_transform.input.active())
++        return;
++
++    // Plate selection may reload the scene. Copy bounds before that operation,
++    // then frame after it, without retaining references into selection caches.
++    const BoundingBoxf3 selection_box = m_selection.get_bounding_box();
++    if (m_canvas_type == CanvasView3D && m_model && wxGetApp().is_editor()) {
++        if (Plater* plater = wxGetApp().plater()) {
++            PartPlateList& plates = plater->get_partplate_list();
++            const int selected_plate = ZenithFocus::single_plate(
++                m_selection.get_content(), plates.get_plate_count(),
++                [&](int object, int instance) {
++                    if (object < 0 || object >= static_cast<int>(m_model->objects.size()) ||
++                        instance < 0 || instance >= static_cast<int>(m_model->objects[object]->instances.size()))
++                        return -1;
++                    return plates.find_instance(object, instance);
++                });
++            if (selected_plate >= 0 && selected_plate != plates.get_curr_plate_index()) {
++                // Native plate activation reloads volumes and selects the plate
++                // in the object list. Restore the exact selection using stable
++                // geometry IDs, rather than indices into the old volume array.
++                const Selection::EMode mode = m_selection.get_mode();
++                std::vector<std::pair<size_t, size_t>> selected_geometry;
++                for (unsigned int index : m_selection.get_volume_idxs())
++                    selected_geometry.push_back(m_selection.get_volume(index)->geometry_id);
++                std::sort(selected_geometry.begin(), selected_geometry.end());
++                plater->select_plate(selected_plate, false);
++                m_selection.set_deserialized(mode, selected_geometry);
++                wxGetApp().obj_list()->update_selections();
++                m_gizmos.update_data();
++            }
++        }
++    }
++
++    // Normal Prepare orbit already uses the active plate's center.
++    _zoom_to_box(selection_box);
+ }
+ 
+ void GLCanvas3D::zoom_to_gcode()
+@@ -3067,6 +3103,7 @@ void GLCanvas3D::mirror_selection(Axis axis)
  // 5) Out of bed collision status & message overlay (texture)
  void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_refresh)
  {
@@ -237,7 +289,7 @@ index 2a89739..2dfe593 100644
      if (m_canvas == nullptr || m_config == nullptr || m_model == nullptr)
          return;
  
-@@ -3990,6 +3992,7 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
+@@ -3990,6 +4027,7 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
  
  void GLCanvas3D::on_char(wxKeyEvent& evt)
  {
@@ -245,7 +297,7 @@ index 2a89739..2dfe593 100644
      if (!m_initialized)
          return;
  
-@@ -4416,6 +4419,7 @@ public:
+@@ -4416,6 +4454,7 @@ public:
  
  void GLCanvas3D::on_key(wxKeyEvent& evt)
  {
@@ -253,7 +305,7 @@ index 2a89739..2dfe593 100644
      static GLCanvas3D const * thiz = nullptr;
      static TranslationProcessor translationProcessor(nullptr, nullptr);
      if (thiz != this) {
-@@ -4705,6 +4709,7 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
+@@ -4705,6 +4744,7 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
  
  void GLCanvas3D::on_mouse_wheel(wxMouseEvent& evt)
  {
@@ -261,7 +313,7 @@ index 2a89739..2dfe593 100644
  #ifdef WIN32
      // Try to filter out spurious mouse wheel events comming from 3D mouse.
      if (wxGetApp().plater()->get_mouse3d_controller().process_mouse_wheel())
-@@ -4979,6 +4984,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
+@@ -4979,6 +5019,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
      evt.SetY(evt.GetY() * scale);
  #endif
  
@@ -270,7 +322,7 @@ index 2a89739..2dfe593 100644
      Point pos(evt.GetX(), evt.GetY());
  
      ImGuiWrapper* imgui = wxGetApp().imgui();
-@@ -5688,6 +5695,7 @@ void GLCanvas3D::on_paint(wxPaintEvent& evt)
+@@ -5688,6 +5730,7 @@ void GLCanvas3D::on_paint(wxPaintEvent& evt)
  
  void GLCanvas3D::on_kill_focus(wxFocusEvent &evt)
  {
@@ -278,7 +330,7 @@ index 2a89739..2dfe593 100644
      ImGui::SetWindowFocus(nullptr);
      render();
      evt.Skip();
-@@ -8545,6 +8553,7 @@ void GLCanvas3D::_render_overlays()
+@@ -8545,6 +8588,7 @@ void GLCanvas3D::_render_overlays()
              }*/
      }
      m_labels.render(sorted_instances);
@@ -286,7 +338,7 @@ index 2a89739..2dfe593 100644
      _render_3d_navigator();
  }
  
-@@ -13563,5 +13572,7 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
+@@ -13563,5 +13607,7 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
      return object.instances[instance_idx];
  }
  
@@ -295,7 +347,7 @@ index 2a89739..2dfe593 100644
  } // namespace GUI
  } // namespace Slic3r
 diff --git a/src/slic3r/GUI/GLCanvas3D.hpp b/src/slic3r/GUI/GLCanvas3D.hpp
-index ec94d32..489bb4d 100644
+index ec94d32..e09025a 100644
 --- a/src/slic3r/GUI/GLCanvas3D.hpp
 +++ b/src/slic3r/GUI/GLCanvas3D.hpp
 @@ -10,6 +10,7 @@
@@ -346,6 +398,59 @@ index ec94d32..489bb4d 100644
      const DynamicPrintConfig* m_config;
      Model* m_model;
      BackgroundSlicingProcess *m_process;
+@@ -824,6 +858,7 @@ public:
+     ~GLCanvas3D();
+ 
+     bool is_initialized() const { return m_initialized; }
++    bool is_zenith_transform_active() const { return m_zenith_transform.input.active(); }
+ 
+     void set_context(wxGLContext* context);
+     void set_type(ECanvasType type);
+diff --git a/src/slic3r/GUI/KBShortcutsDialog.cpp b/src/slic3r/GUI/KBShortcutsDialog.cpp
+index fae1dd0..fe5fd5a 100644
+--- a/src/slic3r/GUI/KBShortcutsDialog.cpp
++++ b/src/slic3r/GUI/KBShortcutsDialog.cpp
+@@ -251,6 +251,7 @@ void KBShortcutsDialog::fill_shortcuts()
+             {ctrl + "6", L("Camera view - Right")},
+             {ctrl + "7", L("Camera view - Isometric")},
+             {       "Z", L("Camera view - Fit to scene or selection")},
++            {"Numpad .", L("Focus selection and activate its plate (Prepare viewport)")},
+             {ctrl + "W", L("Reset Window Layout")},
+             {ctrl + "E", L("Show Labels by Layer")},
+             {L("Shift+E"), L("Show Labels by Object")},
+diff --git a/src/slic3r/GUI/MainFrame.cpp b/src/slic3r/GUI/MainFrame.cpp
+index 375755c..3b4e234 100644
+--- a/src/slic3r/GUI/MainFrame.cpp
++++ b/src/slic3r/GUI/MainFrame.cpp
+@@ -10,7 +10,7 @@
+ #include <wx/progdlg.h>
+ #include <wx/textentry.h>
+ #include <wx/tooltip.h>
+-//#include <wx/glcanvas.h>
++#include <wx/glcanvas.h>
+ #include <wx/filename.h>
+ #include <wx/debug.h>
+ 
+@@ -678,6 +678,19 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
+ ;    }
+     this->Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent &evt) {
+         const int key_code = evt.GetKeyCode();
++        // A running G/R/S operation owns its keys. In particular, Z means its
++        // axis constraint, not the global Fit Camera action (which can switch
++        // plates and reload the scene). Consume the hook after forwarding once.
++        if (m_plater) {
++            GLCanvas3D* canvas = m_plater->get_current_canvas3D();
++            if (canvas && canvas->is_zenith_transform_active() &&
++                wxWindow::FindFocus() == canvas->get_wxglcanvas()) {
++                wxKeyEvent key_event(evt);
++                key_event.SetEventType(wxEVT_KEY_DOWN);
++                canvas->on_key(key_event);
++                return;
++            }
++        }
+ #ifdef __APPLE__
+         if (evt.CmdDown() && (evt.GetKeyCode() == 'H')) {
+             // Pass Cmd+H through to the macOS application menu so the
 diff --git a/src/slic3r/GUI/Selection.hpp b/src/slic3r/GUI/Selection.hpp
 index f853212..0876c34 100644
 --- a/src/slic3r/GUI/Selection.hpp
@@ -359,6 +464,36 @@ index f853212..0876c34 100644
      void setup_cache();
      void translate(const Vec3d &displacement, TransformationType transformation_type);//new
      void move_to_center(const Vec3d& displacement, bool local = false);
+diff --git a/src/slic3r/GUI/ZenithFocus.hpp b/src/slic3r/GUI/ZenithFocus.hpp
+new file mode 100644
+index 0000000..a6e37b5
+--- /dev/null
++++ b/src/slic3r/GUI/ZenithFocus.hpp
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++#pragma once
++
++namespace Slic3r { namespace GUI { namespace ZenithFocus {
++
++// Resolve model-instance membership, not position or the first object's index.
++// A selection spanning plates (or containing unassigned instances) has no
++// unique plate to activate, so preserve the current plate in that case.
++template<class Content, class ResolvePlate>
++int single_plate(const Content& selection, int plate_count, ResolvePlate resolve)
++{
++    int result = -1;
++    for (const auto& object : selection) {
++        for (const int instance : object.second) {
++            const int plate = resolve(object.first, instance);
++            if (plate < 0 || plate >= plate_count || (result >= 0 && plate != result))
++                return -1;
++            result = plate;
++        }
++    }
++    return result;
++}
++
++}}} // namespace Slic3r::GUI::ZenithFocus
 diff --git a/src/slic3r/GUI/ZenithTransform.hpp b/src/slic3r/GUI/ZenithTransform.hpp
 new file mode 100644
 index 0000000..768cf9d
@@ -430,10 +565,10 @@ index 0000000..768cf9d
 +}
 diff --git a/src/slic3r/GUI/ZenithTransformCanvas.inc b/src/slic3r/GUI/ZenithTransformCanvas.inc
 new file mode 100644
-index 0000000..6e23e41
+index 0000000..dc5c1b8
 --- /dev/null
 +++ b/src/slic3r/GUI/ZenithTransformCanvas.inc
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,271 @@
 +// SPDX-License-Identifier: AGPL-3.0-or-later
 +// Included at the end of GLCanvas3D.cpp, inside Slic3r::GUI.
 +bool GLCanvas3D::_zenith_scene_matches() const
@@ -599,6 +734,15 @@ index 0000000..6e23e41
 +        if (!down || evt.HasAnyModifiers() || !m_initialized || m_canvas == nullptr ||
 +            wxWindow::FindFocus() != m_canvas || ImGui::GetIO().WantCaptureKeyboard || ImGui::GetIO().WantTextInput)
 +            return false;
++        // Native focus shortcut: modal G/R/S numeric entry below takes priority.
++        if ((key == WXK_NUMPAD_DECIMAL || key == WXK_DECIMAL || key == WXK_NUMPAD_DELETE) &&
++            m_canvas_type == CanvasView3D && wxGetApp().is_editor() &&
++            !m_mouse.dragging && !m_selection.is_dragging() && !m_gizmos.is_dragging() &&
++            !m_gizmos.is_running() && !is_layers_editing_enabled()) {
++            m_zenith_swallow_key_up = key;
++            if (!m_selection.is_empty()) zoom_to_fit();
++            return true;
++        }
 +        Mode mode = key == 'G' ? Mode::Move : key == 'R' ? Mode::Rotate : key == 'S' ? Mode::Scale : Mode::None;
 +        if (mode == Mode::None) return false;
 +        return _zenith_begin(mode);
@@ -698,10 +842,10 @@ index 0000000..6e23e41
 +}
 diff --git a/zenith/tests/CMakeLists.txt b/zenith/tests/CMakeLists.txt
 new file mode 100644
-index 0000000..fa44d95
+index 0000000..a1df1b0
 --- /dev/null
 +++ b/zenith/tests/CMakeLists.txt
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,37 @@
 +cmake_minimum_required(VERSION 3.16)
 +project(ZenithCostTests LANGUAGES CXX)
 +enable_testing()
@@ -730,6 +874,15 @@ index 0000000..fa44d95
 +  target_compile_options(zenith_transform_test PRIVATE -UNDEBUG)
 +endif()
 +add_test(NAME zenith_transform COMMAND zenith_transform_test)
++add_executable(zenith_focus_test focus_test.cpp)
++target_include_directories(zenith_focus_test PRIVATE "${STUDIO_ROOT}/src")
++target_compile_features(zenith_focus_test PRIVATE cxx_std_17)
++if(MSVC)
++  target_compile_options(zenith_focus_test PRIVATE /UNDEBUG)
++else()
++  target_compile_options(zenith_focus_test PRIVATE -UNDEBUG)
++endif()
++add_test(NAME zenith_focus COMMAND zenith_focus_test)
 diff --git a/zenith/tests/cost_test.cpp b/zenith/tests/cost_test.cpp
 new file mode 100644
 index 0000000..54921f2
@@ -782,6 +935,44 @@ index 0000000..54921f2
 +    for (const char* bad : {"nan", "inf", "1e100", "abc", "9junk", "9,5"}) near(parse(bad, 7), 7);
 +    near(parse("12.50", 7), 12.5); near(parse(number(62.5), 0), 62.5);
 +    std::cout << "PASS: calculator, toggles, markup, profile totals, invalid data and settings round-trip\n";
++}
+diff --git a/zenith/tests/focus_test.cpp b/zenith/tests/focus_test.cpp
+new file mode 100644
+index 0000000..e07a699
+--- /dev/null
++++ b/zenith/tests/focus_test.cpp
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++#include "slic3r/GUI/ZenithFocus.hpp"
++#include <cassert>
++#include <map>
++#include <set>
++#include <utility>
++
++int main()
++{
++    using Content = std::map<int, std::set<int>>;
++    using Membership = std::map<std::pair<int,int>, int>;
++    Membership membership {{{0,0},0}, {{0,1},1}, {{1,0},1}, {{2,0},2}, {{3,0},4}};
++    auto resolve = [&](int object, int instance) {
++        const auto it = membership.find({object,instance});
++        return it == membership.end() ? -1 : it->second;
++    };
++    auto plate = [&](const Content& content) {
++        return Slic3r::GUI::ZenithFocus::single_plate(content, 3, resolve);
++    };
++    assert(plate({}) == -1);
++    assert(plate({{0,{}}}) == -1);
++    assert(plate({{0,{0}}}) == 0);
++    assert(plate({{0,{1}}}) == 1); // same model, different instance/plate
++    assert(plate({{0,{1}}, {1,{0}}}) == 1); // multiple objects, one plate
++    assert(plate({{0,{0,1}}}) == -1); // instances spanning plates
++    assert(plate({{0,{0}}, {2,{0}}}) == -1);
++    assert(plate({{9,{0}}}) == -1); // off-plate/unassigned
++    assert(plate({{0,{0}}, {9,{0}}}) == -1);
++    assert(plate({{3,{0}}}) == -1); // out-of-range plate index
++    assert(plate({{-1,{0}}}) == -1);
++    assert(plate({{1000,{0}}}) == -1); // wipe tower/synthetic selection
 +}
 diff --git a/zenith/tests/panel_test.cpp b/zenith/tests/panel_test.cpp
 new file mode 100644
