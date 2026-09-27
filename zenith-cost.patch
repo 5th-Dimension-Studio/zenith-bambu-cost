@@ -217,12 +217,491 @@ index 0000000..a992d00
 +    ImGui::PopID();
 +}
 +}
+diff --git a/src/slic3r/GUI/GLCanvas3D.cpp b/src/slic3r/GUI/GLCanvas3D.cpp
+index 2a89739..2dfe593 100644
+--- a/src/slic3r/GUI/GLCanvas3D.cpp
++++ b/src/slic3r/GUI/GLCanvas3D.cpp
+@@ -1745,6 +1745,7 @@ unsigned int GLCanvas3D::get_volumes_count() const {
+ 
+ void GLCanvas3D::reset_volumes(bool set_notice)
+ {
++    if (m_zenith_transform.input.active()) _zenith_finish(false);
+     if (!m_initialized)
+         return;
+ 
+@@ -3067,6 +3068,7 @@ void GLCanvas3D::mirror_selection(Axis axis)
+ // 5) Out of bed collision status & message overlay (texture)
+ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_refresh)
+ {
++    if (m_zenith_transform.input.active()) _zenith_finish(false);
+     if (m_canvas == nullptr || m_config == nullptr || m_model == nullptr)
+         return;
+ 
+@@ -3990,6 +3992,7 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
+ 
+ void GLCanvas3D::on_char(wxKeyEvent& evt)
+ {
++    if (m_zenith_transform.input.active()) return;
+     if (!m_initialized)
+         return;
+ 
+@@ -4416,6 +4419,7 @@ public:
+ 
+ void GLCanvas3D::on_key(wxKeyEvent& evt)
+ {
++    if (_zenith_key(evt)) return;
+     static GLCanvas3D const * thiz = nullptr;
+     static TranslationProcessor translationProcessor(nullptr, nullptr);
+     if (thiz != this) {
+@@ -4705,6 +4709,7 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
+ 
+ void GLCanvas3D::on_mouse_wheel(wxMouseEvent& evt)
+ {
++    if (m_zenith_transform.input.active()) return;
+ #ifdef WIN32
+     // Try to filter out spurious mouse wheel events comming from 3D mouse.
+     if (wxGetApp().plater()->get_mouse3d_controller().process_mouse_wheel())
+@@ -4979,6 +4984,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
+     evt.SetY(evt.GetY() * scale);
+ #endif
+ 
++    if (_zenith_mouse(evt)) return;
++
+     Point pos(evt.GetX(), evt.GetY());
+ 
+     ImGuiWrapper* imgui = wxGetApp().imgui();
+@@ -5688,6 +5695,7 @@ void GLCanvas3D::on_paint(wxPaintEvent& evt)
+ 
+ void GLCanvas3D::on_kill_focus(wxFocusEvent &evt)
+ {
++    if (m_zenith_transform.input.active()) _zenith_finish(false);
+     ImGui::SetWindowFocus(nullptr);
+     render();
+     evt.Skip();
+@@ -8545,6 +8553,7 @@ void GLCanvas3D::_render_overlays()
+             }*/
+     }
+     m_labels.render(sorted_instances);
++    _zenith_overlay();
+     _render_3d_navigator();
+ }
+ 
+@@ -13563,5 +13572,7 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
+     return object.instances[instance_idx];
+ }
+ 
++#include "ZenithTransformCanvas.inc"
++
+ } // namespace GUI
+ } // namespace Slic3r
+diff --git a/src/slic3r/GUI/GLCanvas3D.hpp b/src/slic3r/GUI/GLCanvas3D.hpp
+index ec94d32..489bb4d 100644
+--- a/src/slic3r/GUI/GLCanvas3D.hpp
++++ b/src/slic3r/GUI/GLCanvas3D.hpp
+@@ -10,6 +10,7 @@
+ 
+ #include "Event.hpp"
+ #include "Selection.hpp"
++#include "ZenithTransform.hpp"
+ #include "Gizmos/GLGizmosManager.hpp"
+ #include "GUI_ObjectLayers.hpp"
+ #include "GLSelectionRectangle.hpp"
+@@ -649,6 +650,39 @@ private:
+     RenderTimer m_render_timer;
+ 
+     Selection m_selection;
++
++    // Transient viewport preview: the Model is changed only by native do_* on confirm.
++    struct ZenithTransformState {
++        ZenithTransform::Input input;
++        struct SavedVolume {
++            GLVolume* volume;
++            Geometry::Transformation instance, part;
++        };
++        std::vector<SavedVolume> original;
++        Selection::IndicesList selection;
++        Selection::EMode selection_mode = Selection::Instance;
++        Vec2d last_mouse = Vec2d::Zero();
++        Vec3d mouse_move = Vec3d::Zero();
++        Vec3d displayed = Vec3d::Zero();
++        double mouse_scalar = 0.0;
++        double scale_log = 0.0;
++        bool snap = false;
++        bool valid = true;
++        bool changed = false;
++        std::string message;
++    } m_zenith_transform;
++    bool m_zenith_swallow_left_up = false;
++    bool m_zenith_swallow_right_up = false;
++    int m_zenith_swallow_key_up = 0;
++    bool _zenith_key(wxKeyEvent& evt);
++    bool _zenith_mouse(wxMouseEvent& evt);
++    bool _zenith_begin(ZenithTransform::Mode mode);
++    bool _zenith_scene_matches() const;
++    void _zenith_restore();
++    void _zenith_preview();
++    void _zenith_finish(bool commit);
++    void _zenith_overlay();
++
+     const DynamicPrintConfig* m_config;
+     Model* m_model;
+     BackgroundSlicingProcess *m_process;
+diff --git a/src/slic3r/GUI/Selection.hpp b/src/slic3r/GUI/Selection.hpp
+index f853212..0876c34 100644
+--- a/src/slic3r/GUI/Selection.hpp
++++ b/src/slic3r/GUI/Selection.hpp
+@@ -413,6 +413,8 @@ public:
+     // Returns the bounding sphere: first = center, second = radius
+     const std::pair<Vec3d, double> get_bounding_sphere() const;
+ 
++    // Invalidate derived bounds after a cancelled viewport-only transform.
++    void invalidate_transform_bounds() { set_bounding_boxes_dirty(); }
+     void setup_cache();
+     void translate(const Vec3d &displacement, TransformationType transformation_type);//new
+     void move_to_center(const Vec3d& displacement, bool local = false);
+diff --git a/src/slic3r/GUI/ZenithTransform.hpp b/src/slic3r/GUI/ZenithTransform.hpp
+new file mode 100644
+index 0000000..768cf9d
+--- /dev/null
++++ b/src/slic3r/GUI/ZenithTransform.hpp
+@@ -0,0 +1,63 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++#pragma once
++#include <array>
++#include <cmath>
++#include <locale>
++#include <sstream>
++#include <string>
++
++namespace ZenithTransform {
++enum class Mode { None, Move, Rotate, Scale };
++// Global axes only. A plane constraint excludes its named axis.
++struct Input {
++    Mode mode = Mode::None;
++    int axis = -1;
++    bool plane = false;
++    std::string text;
++    bool active() const { return mode != Mode::None; }
++    void constrain(int a, bool exclude) {
++        // Rotation around a plane means around its normal, as in Blender.
++        exclude = exclude && mode != Mode::Rotate;
++        if (axis == a && plane == exclude) { axis = -1; plane = false; }
++        else { axis = a; plane = exclude; }
++    }
++    bool append(char c) {
++        if (c == '-') {
++            if (!text.empty() && text.front() == '-') text.erase(0, 1);
++            else text.insert(text.begin(), '-');
++            return true;
++        }
++        if (text.size() >= 24) return false;
++        if (c == '.' && text.find('.') == std::string::npos) { text += c; return true; }
++        if (c >= '0' && c <= '9') { text += c; return true; }
++        return false;
++    }
++    bool value(double& out) const {
++        if (text.empty()) return false;
++        std::istringstream in(text);
++        in.imbue(std::locale::classic());
++        if (!(in >> out) || !std::isfinite(out)) return false;
++        in >> std::ws;
++        if (!in.eof()) return false;
++        return mode == Mode::Scale ? out >= 0.001 && out <= 1000.0 : std::abs(out) <= 1000000.0;
++    }
++    std::array<double, 3> mask() const {
++        std::array<double, 3> m{{1, 1, 1}};
++        if (axis >= 0) {
++            if (!plane) m = {{0, 0, 0}};
++            m[axis] = plane ? 0 : 1;
++        }
++        return m;
++    }
++    std::array<double, 3> scaling(double factor) const {
++        auto m = mask();
++        for (auto& component : m) component = component ? factor : 1;
++        return m;
++    }
++    std::string constraint_name() const {
++        if (axis < 0) return mode == Mode::Scale ? "XYZ" : "View";
++        return plane ? (axis == 0 ? "YZ" : axis == 1 ? "XZ" : "XY") : std::string(1, "XYZ"[axis]);
++    }
++};
++inline double snap(double value, double step) { return std::round(value / step) * step; }
++}
+diff --git a/src/slic3r/GUI/ZenithTransformCanvas.inc b/src/slic3r/GUI/ZenithTransformCanvas.inc
+new file mode 100644
+index 0000000..6e23e41
+--- /dev/null
++++ b/src/slic3r/GUI/ZenithTransformCanvas.inc
+@@ -0,0 +1,262 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++// Included at the end of GLCanvas3D.cpp, inside Slic3r::GUI.
++bool GLCanvas3D::_zenith_scene_matches() const
++{
++    const auto& s = m_zenith_transform;
++    if (s.original.size() != m_volumes.volumes.size() || s.selection != m_selection.get_volume_idxs() ||
++        s.selection_mode != m_selection.get_mode()) return false;
++    for (size_t i = 0; i < s.original.size(); ++i)
++        if (s.original[i].volume != m_volumes.volumes[i]) return false;
++    return true;
++}
++
++bool GLCanvas3D::_zenith_begin(ZenithTransform::Mode mode)
++{
++    if (!m_initialized || m_canvas_type != CanvasView3D || !wxGetApp().is_editor() ||
++        !m_selection.is_enabled() || m_selection.is_empty() || m_selection.is_wipe_tower() ||
++        m_mouse.dragging || m_selection.is_dragging() || m_gizmos.is_dragging() ||
++        is_layers_editing_enabled() || m_gizmos.is_ban_move_glvolume()) return false;
++    const auto current = m_gizmos.get_current_type();
++    if (current != GLGizmosManager::Undefined && current != GLGizmosManager::Move &&
++        current != GLGizmosManager::Rotate && current != GLGizmosManager::Scale) return false;
++    const auto tool = mode == ZenithTransform::Mode::Move ? GLGizmosManager::Move :
++                      mode == ZenithTransform::Mode::Rotate ? GLGizmosManager::Rotate : GLGizmosManager::Scale;
++    if (!m_gizmos.get_gizmo_active_condition(tool)) return false;
++    m_gizmos.reset_all_states();
++    auto& s = m_zenith_transform;
++    s = ZenithTransformState{};
++    s.input.mode = mode;
++    if (mode == ZenithTransform::Mode::Scale) s.displayed = Vec3d::Ones();
++    s.selection = m_selection.get_volume_idxs();
++    s.selection_mode = m_selection.get_mode();
++    for (GLVolume* v : m_volumes.volumes)
++        s.original.push_back({v, v->get_instance_transformation(), v->get_volume_transformation()});
++    const wxPoint p = m_canvas->ScreenToClient(wxGetMousePosition());
++    s.last_mouse = Vec2d(p.x, p.y);
++    m_selection.start_dragging();
++    m_dirty = true;
++    request_extra_frame();
++    return true;
++}
++
++void GLCanvas3D::_zenith_restore()
++{
++    auto& s = m_zenith_transform;
++    // Never dereference saved pointers after the scene has been rebuilt.
++    if (s.original.size() != m_volumes.volumes.size()) return;
++    for (size_t i = 0; i < s.original.size(); ++i) {
++        const auto& saved = s.original[i];
++        if (saved.volume != m_volumes.volumes[i]) continue;
++        saved.volume->set_instance_transformation(saved.instance);
++        saved.volume->set_volume_transformation(saved.part);
++    }
++    m_selection.invalidate_transform_bounds();
++    requires_check_outside_state();
++}
++
++void GLCanvas3D::_zenith_preview()
++{
++    using Mode = ZenithTransform::Mode;
++    auto& s = m_zenith_transform;
++    if (!s.input.active()) return;
++    if (!_zenith_scene_matches()) { _zenith_finish(false); return; }
++    _zenith_restore();
++    s.changed = false;
++    s.valid = true;
++    s.message.clear();
++    double number = 0;
++    const bool numeric = !s.input.text.empty();
++    if (numeric && !s.input.value(number)) {
++        s.valid = false;
++        s.message = s.input.mode == Mode::Scale ? "Enter a scale factor from 0.001 to 1000." : "Finish entering a valid number.";
++    } else if (s.input.mode == Mode::Scale && s.input.axis >= 0 && m_selection.requires_uniform_scale()) {
++        s.valid = false;
++        s.message = "This selection requires uniform scale. Press the constraint again to clear it.";
++    }
++    if (s.valid) {
++        const TransformationType type(TransformationType::World_Relative_Joint);
++        if (s.input.mode == Mode::Move) {
++            Vec3d delta = s.mouse_move;
++            const auto mask = s.input.mask();
++            if (s.input.axis >= 0 && !s.input.plane) {
++                delta = Vec3d::Zero();
++                delta[s.input.axis] = numeric ? number : s.mouse_scalar;
++            } else {
++                for (int i = 0; i < 3; ++i) delta[i] *= mask[i];
++                if (numeric) {
++                    if (delta.norm() < 1e-8) {
++                        delta = get_active_camera().get_dir_right();
++                        for (int i = 0; i < 3; ++i) delta[i] *= mask[i];
++                        if (delta.norm() < 1e-8) {
++                            delta = get_active_camera().get_dir_up();
++                            for (int i = 0; i < 3; ++i) delta[i] *= mask[i];
++                        }
++                    }
++                    if (delta.norm() > 1e-8) delta = delta.normalized() * number;
++                }
++            }
++            if (s.snap && !numeric)
++                for (int i = 0; i < 3; ++i) delta[i] = ZenithTransform::snap(delta[i], 1.0);
++            s.displayed = delta;
++            m_selection.translate(delta, type);
++            s.changed = delta.squaredNorm() > 1e-16;
++        } else if (s.input.mode == Mode::Rotate) {
++            double degrees = numeric ? number : s.mouse_scalar;
++            if (s.snap && !numeric) degrees = ZenithTransform::snap(degrees, 5.0);
++            Vec3d axis = -get_active_camera().get_dir_forward();
++            if (s.input.axis >= 0) { axis = Vec3d::Zero(); axis[s.input.axis] = 1.0; }
++            const Transform3d rotation(Eigen::AngleAxisd(degrees * M_PI / 180.0, axis.normalized()));
++            s.displayed = Vec3d(degrees, 0, 0);
++            m_selection.rotate(Geometry::extract_euler_angles(rotation), type);
++            s.changed = std::abs(degrees) > 1e-8;
++        } else {
++            double factor = numeric ? number : std::exp(s.scale_log);
++            if (s.snap && !numeric) factor = ZenithTransform::snap(factor, 0.1);
++            factor = std::max(0.001, std::min(1000.0, factor));
++            const auto scale = s.input.scaling(factor);
++            s.displayed = Vec3d(scale[0], scale[1], scale[2]);
++            m_selection.scale(s.displayed, type);
++            s.changed = std::abs(factor - 1.0) > 1e-8;
++        }
++    }
++    m_dirty = true;
++    request_extra_frame();
++}
++
++void GLCanvas3D::_zenith_finish(bool commit)
++{
++    using Mode = ZenithTransform::Mode;
++    auto& s = m_zenith_transform;
++    if (!s.input.active()) return;
++    if (commit && !s.valid) return;
++    const Mode mode = s.input.mode;
++    const bool apply = commit && s.changed && _zenith_scene_matches();
++    if (!apply) _zenith_restore();
++    // Clear modal state before native commit can trigger a scene reload or focus event.
++    s.input.mode = Mode::None;
++    m_selection.stop_dragging();
++    if (apply) {
++        // These are the unmodified native commit functions: one undo snapshot and
++        // exactly Bambu's normal bed placement, sinking and instance-sync behavior.
++        if (mode == Mode::Move) do_move("Blender-style Move");
++        else if (mode == Mode::Rotate) do_rotate("Blender-style Rotate");
++        else do_scale("Blender-style Scale");
++    }
++    s.original.clear();
++    m_selection.invalidate_transform_bounds();
++    m_gizmos.update_data();
++    refresh_camera_scene_box();
++    requires_check_outside_state();
++    post_event(SimpleEvent(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED));
++    m_dirty = true;
++    request_extra_frame();
++}
++
++bool GLCanvas3D::_zenith_key(wxKeyEvent& evt)
++{
++    using Mode = ZenithTransform::Mode;
++    const int key = evt.GetKeyCode();
++    const bool down = evt.GetEventType() == wxEVT_KEY_DOWN;
++    if (!down && key == m_zenith_swallow_key_up) { m_zenith_swallow_key_up = 0; return true; }
++    auto& s = m_zenith_transform;
++    if (!s.input.active()) {
++        if (!down || evt.HasAnyModifiers() || !m_initialized || m_canvas == nullptr ||
++            wxWindow::FindFocus() != m_canvas || ImGui::GetIO().WantCaptureKeyboard || ImGui::GetIO().WantTextInput)
++            return false;
++        Mode mode = key == 'G' ? Mode::Move : key == 'R' ? Mode::Rotate : key == 'S' ? Mode::Scale : Mode::None;
++        if (mode == Mode::None) return false;
++        return _zenith_begin(mode);
++    }
++    if (!down) {
++        if (key == WXK_CONTROL) { s.snap = false; _zenith_preview(); }
++        return true;
++    }
++    if (key == WXK_ESCAPE || key == WXK_RETURN || key == WXK_NUMPAD_ENTER) {
++        m_zenith_swallow_key_up = key;
++        _zenith_finish(key != WXK_ESCAPE);
++        return true;
++    }
++    if (key == WXK_CONTROL) { s.snap = true; _zenith_preview(); return true; }
++    if (evt.ControlDown() || evt.AltDown() || evt.CmdDown()) return true;
++    if (key == 'X' || key == 'Y' || key == 'Z') {
++        s.input.constrain(key - 'X', evt.ShiftDown());
++        // A new constraint starts mouse motion at neutral; entered numbers persist.
++        s.mouse_move = Vec3d::Zero(); s.mouse_scalar = 0; s.scale_log = 0;
++    } else if (key == WXK_BACK) {
++        if (!s.input.text.empty()) s.input.text.pop_back();
++    } else if (key == WXK_DELETE) {
++        s.input.text.clear();
++    } else {
++        char c = 0;
++        if (key >= '0' && key <= '9' && !evt.ShiftDown()) c = static_cast<char>(key);
++        else if (key >= WXK_NUMPAD0 && key <= WXK_NUMPAD9) c = '0' + key - WXK_NUMPAD0;
++        else if (key == '.' || key == WXK_DECIMAL || key == WXK_NUMPAD_DECIMAL) c = '.';
++        else if (key == '-' || key == WXK_SUBTRACT || key == WXK_NUMPAD_SUBTRACT) c = '-';
++        if (!c || !s.input.append(c)) return true;
++    }
++    _zenith_preview();
++    return true;
++}
++
++bool GLCanvas3D::_zenith_mouse(wxMouseEvent& evt)
++{
++    if (evt.LeftUp() && m_zenith_swallow_left_up) { m_zenith_swallow_left_up = false; return true; }
++    if (evt.RightUp() && m_zenith_swallow_right_up) { m_zenith_swallow_right_up = false; return true; }
++    auto& s = m_zenith_transform;
++    if (!s.input.active()) return false;
++    if (evt.LeftDown() || evt.RightDown()) {
++        if (evt.LeftDown()) m_zenith_swallow_left_up = true;
++        if (evt.RightDown()) m_zenith_swallow_right_up = true;
++        _zenith_finish(evt.LeftDown());
++        return true;
++    }
++    if (evt.Leaving()) { _zenith_finish(false); return true; }
++    if (evt.Moving() || evt.Dragging()) {
++        const Vec2d p(evt.GetX(), evt.GetY());
++        const Vec2d d = (p - s.last_mouse) * (evt.ShiftDown() ? 0.1 : 1.0);
++        s.last_mouse = p;
++        const auto& camera = get_active_camera();
++        const double zoom = std::max(0.001, camera.get_zoom());
++        s.mouse_move += (d.x() * camera.get_dir_right() - d.y() * camera.get_dir_up()) / zoom;
++        if (s.input.mode == ZenithTransform::Mode::Move) {
++            if (s.input.axis >= 0 && !s.input.plane) {
++                const double x = camera.get_dir_right()[s.input.axis];
++                const double y = -camera.get_dir_up()[s.input.axis];
++                const double length2 = x * x + y * y;
++                s.mouse_scalar += length2 > 0.01 ? (d.x() * x + d.y() * y) / (zoom * length2) : -d.y() / zoom;
++            }
++        } else s.mouse_scalar += d.x() * 0.5;
++        s.scale_log = std::max(-6.90775527898, std::min(6.90775527898, s.scale_log + d.x() * 0.005));
++        s.snap = evt.ControlDown();
++        _zenith_preview();
++    }
++    return true;
++}
++
++void GLCanvas3D::_zenith_overlay()
++{
++    auto& s = m_zenith_transform;
++    if (!s.input.active()) return;
++    if (!_zenith_scene_matches()) { _zenith_finish(false); return; }
++    const char* name = s.input.mode == ZenithTransform::Mode::Move ? "Move (mm)" :
++                       s.input.mode == ZenithTransform::Mode::Rotate ? "Rotate (degrees)" : "Scale (factor)";
++    ImGui::SetNextWindowPos(ImVec2(20, 85), ImGuiCond_Always);
++    ImGui::SetNextWindowBgAlpha(0.85f);
++    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 10));
++    ImGui::Begin("Blender-style transform", nullptr, ImGuiWindowFlags_AlwaysAutoResize |
++        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs |
++        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
++    ImGui::Text("%s | %s | %s", name, s.input.axis >= 0 ? "Global" : "", s.input.constraint_name().c_str());
++    if (!s.input.text.empty()) ImGui::Text("Value: %s", s.input.text.c_str());
++    else ImGui::TextUnformatted("Move mouse, or type a value. X / Y / Z: axis; Shift+axis: plane.");
++    if (s.valid) {
++        if (s.input.mode == ZenithTransform::Mode::Rotate) ImGui::Text("Angle: %.3f degrees", s.displayed.x());
++        else ImGui::Text("X: %.3f   Y: %.3f   Z: %.3f", s.displayed.x(), s.displayed.y(), s.displayed.z());
++    }
++    ImGui::TextUnformatted("Enter / left-click: confirm | Esc / right-click: cancel");
++    ImGui::TextUnformatted("Shift: precision | Ctrl: snap | Backspace: edit | Delete: clear value");
++    ImGui::TextUnformatted("Bambu Studio's automatic bed placement remains enabled.");
++    if (!s.message.empty()) ImGui::TextWrapped("%s", s.message.c_str());
++    ImGui::End();
++    ImGui::PopStyleVar();
++}
 diff --git a/zenith/tests/CMakeLists.txt b/zenith/tests/CMakeLists.txt
 new file mode 100644
-index 0000000..fce12c7
+index 0000000..fa44d95
 --- /dev/null
 +++ b/zenith/tests/CMakeLists.txt
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,28 @@
 +cmake_minimum_required(VERSION 3.16)
 +project(ZenithCostTests LANGUAGES CXX)
 +enable_testing()
@@ -242,6 +721,15 @@ index 0000000..fce12c7
 +add_library(zenith_panel_compile OBJECT panel_test.cpp)
 +target_include_directories(zenith_panel_compile PRIVATE "${STUDIO_ROOT}/src")
 +target_compile_features(zenith_panel_compile PRIVATE cxx_std_17)
++add_executable(zenith_transform_test transform_test.cpp)
++target_include_directories(zenith_transform_test PRIVATE "${STUDIO_ROOT}/src")
++target_compile_features(zenith_transform_test PRIVATE cxx_std_17)
++if(MSVC)
++  target_compile_options(zenith_transform_test PRIVATE /UNDEBUG)
++else()
++  target_compile_options(zenith_transform_test PRIVATE -UNDEBUG)
++endif()
++add_test(NAME zenith_transform COMMAND zenith_transform_test)
 diff --git a/zenith/tests/cost_test.cpp b/zenith/tests/cost_test.cpp
 new file mode 100644
 index 0000000..54921f2
@@ -329,4 +817,64 @@ index 0000000..77c5411
 +    }
 +    ImGui::DestroyContext();
 +    std::cout<<"PASS: panel and settings popup render using upstream ImGui; balanced style stacks\n";
++}
+diff --git a/zenith/tests/transform_test.cpp b/zenith/tests/transform_test.cpp
+new file mode 100644
+index 0000000..a26f380
+--- /dev/null
++++ b/zenith/tests/transform_test.cpp
+@@ -0,0 +1,54 @@
++#include "slic3r/GUI/ZenithTransform.hpp"
++#include <cassert>
++#include <iostream>
++using namespace ZenithTransform;
++static double number(Input& input, const char* text) {
++    input.text.clear();
++    for (const char* c = text; *c; ++c) assert(input.append(*c));
++    double result = 0;
++    assert(input.value(result));
++    return result;
++}
++int main() {
++    Input input;
++    assert(!input.active());
++    input.mode = Mode::Move;
++    input.constrain(0, false);
++    assert(number(input, "1") == 1);
++    assert((input.mask() == std::array<double,3>{{1,0,0}}));
++    assert(number(input, "-10.25") == -10.25);
++    input.mode = Mode::Rotate;
++    input.constrain(2, false);
++    assert(input.constraint_name() == "Z");
++    assert(number(input, "90") == 90);
++    input.mode = Mode::Scale;
++    input.constrain(2, true);
++    const double factor = number(input, ".5");
++    assert(factor == 0.5);
++    assert((input.scaling(factor) == std::array<double,3>{{0.5,0.5,1}}));
++    assert(input.constraint_name() == "XY");
++    // Repeated global constraint clears; switching preserves numeric entry.
++    input.constrain(2, true);
++    assert(input.axis == -1 && input.text == ".5");
++    assert((input.scaling(0.5) == std::array<double,3>{{0.5,0.5,0.5}}));
++    input.constrain(0, false);
++    assert((input.scaling(2) == std::array<double,3>{{2,1,1}}));
++    input.constrain(1, true);
++    assert((input.scaling(2) == std::array<double,3>{{2,1,2}}));
++    double v;
++    for (const char* bad : {"-", ".", "-.", "0", "-1", "nan", "1e99", "abc", "1..2", "1001"}) {
++        input.text=bad; assert(!input.value(v));
++    }
++    input.text="0.001"; assert(input.value(v));
++    input.text="1000"; assert(input.value(v));
++    input.text=".5"; assert(!input.append('.')); assert(input.text==".5");
++    input.append('-'); assert(input.text=="-.5"); input.append('-'); assert(input.text==".5");
++    input.mode=Mode::Move; input.text="0"; assert(input.value(v));
++    input.text="1000001"; assert(!input.value(v));
++    input.text="-1000000"; assert(input.value(v));
++    input.mode=Mode::Rotate; input.axis=-1; input.constrain(2,true);
++    assert(input.axis==2 && !input.plane);
++    assert(snap(7.6,5)==10); assert(snap(-7.6,5)==-10);
++    assert(snap(0.49,1)==0);
++    std::cout<<"PASS: G X 1, R Z 90, S Shift+Z .5, constraints, decimals, signs, bounds and snapping\n";
 +}
