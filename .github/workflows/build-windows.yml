@@ -23,7 +23,7 @@ jobs:
           $scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           'C:\Strawberry\perl\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           'C:\Strawberry\c\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Build the Windows app and run calculation tests
+      - name: Build the Windows app and run tests
         run: |
           ./Build-Windows.ps1 -WorkDirectory "$env:GITHUB_WORKSPACE/work"
       - name: Upload the Windows app
@@ -36,7 +36,7 @@ jobs:
       - name: Keep the exact patched source
         if: success()
         run: |
-          git -C work/BambuStudio add src/slic3r/GUI/GCodeRenderer/BaseRenderer.cpp src/slic3r/GUI/GCodeRenderer/ZenithCost.hpp src/slic3r/GUI/GCodeRenderer/ZenithCostPanel.hpp zenith/tests
+          git -C work/BambuStudio add src/slic3r/GUI zenith/tests
           if ($LASTEXITCODE -ne 0) { throw 'Could not stage source snapshot' }
           $tree = git -C work/BambuStudio write-tree
           if ($LASTEXITCODE -ne 0) { throw 'Could not record source tree' }
